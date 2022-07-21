@@ -2,11 +2,10 @@
 
 import rospy
 import math
-import struct
 import numpy as np
 import cv2
 from sensor_msgs.msg import CompressedImage
-from raspicam_node.msg import MotionVectors
+from duckietown_msgs.msg import H264MotionVectors
 from cv_bridge import CvBridge, CvBridgeError
 
 # Motion vectors with SAD values above threshold will be ignored:
@@ -76,7 +75,7 @@ def main():
 
 	rospy.init_node('imv_view')
 	rospy.Subscriber(img_topic, CompressedImage, img_callback)
-	rospy.Subscriber(imv_topic, MotionVectors, imv_callback)
+	rospy.Subscriber(imv_topic, H264MotionVectors, imv_callback)
 	rospy.spin()
 
 if __name__ == '__main__':

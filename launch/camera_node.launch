@@ -1,0 +1,27 @@
+<launch>
+  <arg name="veh"/>
+  <arg name="pkg_name" value="raspicam_node"/>
+  <arg name="node_name" default="camera_node"/>
+  <arg name="param_file_name" default="duckiebot" doc="Specify a param file. ex:megaman"/>
+  <arg name="required" default="false" />
+
+  <arg name="enable_raw" default="false"/>
+  <arg name="enable_imv" default="false"/>
+  <arg name="camera_id" default="0"/>
+  <arg name="camera_frame_id" default="$(arg veh)/camera"/>
+  <arg name="camera_name" default="$(arg veh)/camera"/>
+
+  <group ns="$(arg veh)">
+    <node name="$(arg node_name)" pkg="$(arg pkg_name)" type="$(arg pkg_name)" respawn="true" respawn_delay="10" output="screen" required="$(arg required)">
+      <param name="camera_id" value="$(arg camera_id)"/>
+      <param name="camera_name" value="$(arg camera_name)"/>
+      <param name="camera_frame_id" value="$(arg camera_frame_id)"/>
+
+      <param name="enable_raw" value="$(arg enable_raw)"/>
+      <param name="enable_imv" value="$(arg enable_imv)"/>
+
+      <param name="camera_info_url" value="file:///data/config/calibrations/camera_intrinsic/$(arg veh).yaml"/>
+      <rosparam command="load" file="$(find raspicam_node)/config/$(arg pkg_name)/$(arg param_file_name).yaml"/>
+    </node>
+  </group>
+</launch>

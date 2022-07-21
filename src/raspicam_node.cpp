@@ -68,7 +68,7 @@ int main(int argc, char** argv) {
 #include "sensor_msgs/Image.h"
 #include "sensor_msgs/SetCameraInfo.h"
 #include "std_srvs/Empty.h"
-#include "raspicam_node/MotionVectors.h"
+#include "duckietown_msgs/H264MotionVectors.h"
 #include <diagnostic_updater/diagnostic_updater.h>
 #include <diagnostic_updater/publisher.h>
 
@@ -160,7 +160,7 @@ struct DiagnosedMsgPublisher {
 
 static DiagnosedMsgPublisher<sensor_msgs::Image> image;
 static DiagnosedMsgPublisher<sensor_msgs::CompressedImage> compressed_image;
-static DiagnosedMsgPublisher<raspicam_node::MotionVectors> motion_vectors;
+static DiagnosedMsgPublisher<duckietown_msgs::H264MotionVectors> motion_vectors;
 
 ros::Publisher camera_info_pub;
 sensor_msgs::CameraInfo c_info;
@@ -1359,8 +1359,8 @@ int main(int argc, char** argv) {
         image_pub, state_srv.updater, FrequencyStatusParam(&min_freq, &max_freq, 0.1, 10), TimeStampStatusParam(0, 0.2)));
   }
   if (state_srv.enable_imv_pub) {
-    auto imv_pub = nh_topics.advertise<raspicam_node::MotionVectors>("motion_vectors", 1);
-    motion_vectors.pub.reset(new DiagnosedPublisher<raspicam_node::MotionVectors>(
+    auto imv_pub = nh_topics.advertise<duckietown_msgs::H264MotionVectors>("motion_vectors", 1);
+    motion_vectors.pub.reset(new DiagnosedPublisher<duckietown_msgs::H264MotionVectors>(
         imv_pub, state_srv.updater, FrequencyStatusParam(&min_freq, &max_freq, 0.1, 10), TimeStampStatusParam(0, 0.2)));
   }
   auto cimage_pub = nh_topics.advertise<sensor_msgs::CompressedImage>("image/compressed", 1);
