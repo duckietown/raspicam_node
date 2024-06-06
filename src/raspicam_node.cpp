@@ -78,6 +78,9 @@ int main(int argc, char** argv) {
 #include <raspicam_node/CameraConfig.h>
 
 #include "mmal_cxx_helper.h"
+#include <Eigen/Dense>
+#include <yaml-cpp/yaml.h>
+
 
 static constexpr int IMG_BUFFER_SIZE = 10 * 1024 * 1024;  // 10 MB
 
@@ -86,6 +89,11 @@ static constexpr int VIDEO_FRAME_RATE_DEN = 1;
 
 // Video render needs at least 2 buffers.
 static constexpr int VIDEO_OUTPUT_BUFFERS_NUM = 3;
+
+using Eigen::Matrix3d;
+using Eigen::Vector3d;
+
+static Matrix3d homography;
 
 /** Structure containing all state information for the current run
  */
@@ -161,11 +169,35 @@ struct DiagnosedMsgPublisher {
 static DiagnosedMsgPublisher<sensor_msgs::Image> image;
 static DiagnosedMsgPublisher<sensor_msgs::CompressedImage> compressed_image;
 static DiagnosedMsgPublisher<raspicam_node::MotionVectors> motion_vectors;
+static DiagnosedMsgPublisher<raspicam_node::MotionVectors> motion_vectors_raw;
 
+
+// Global or static variable to hold the transformation matrix
 ros::Publisher camera_info_pub;
 sensor_msgs::CameraInfo c_info;
 std::string camera_frame_id;
 int skip_frames = 0;
+
+static int load_homography_from_file(std::string homography_path) {
+    YAML::Node config = YAML::LoadFile(homography_path);
+    // The homography is a 3x3 matrix
+    int rows = 3; 
+    int cols = 3;
+    
+    std::vector<double> data(rows*cols);
+
+    // Data is in flattened format
+    data = config["homography"].as<std::vector<double>>();
+    for (int i = 0; i < rows; ++i) {
+        for (int j = 0; j < cols; ++j) {
+            homography(i, j) = data[i * cols + j];
+        }
+    }
+
+    std::cout << "Loaded homography:" << std::endl;
+    std::cout << homography << std::endl;
+    return 0;
+}
 
 /**
  * Assign a default set of parameters to the state passed in
@@ -195,7 +227,9 @@ static void configure_parameters(RASPIVID_STATE& state, ros::NodeHandle& nh) {
 
   // Set up the camera_parameters to default
   raspicamcontrol_set_defaults(state.camera_parameters);
-
+  std::string homography_path;
+  nh.param<std::string>("homography_path", homography_path, "/data/config/calibrations/camera_extrinsic/default.yaml");
+  load_homography_from_file(homography_path);
   bool temp;
   nh.param<bool>("hFlip", temp, false);
   state.camera_parameters.hflip = temp;  // Hack for bool param => int variable
@@ -337,17 +371,31 @@ static void video_encoder_buffer_callback(MMAL_PORT_T* port, MMAL_BUFFER_HEADER_
     motion_vectors.msg.x.resize(num_elements);
     motion_vectors.msg.y.resize(num_elements);
     motion_vectors.msg.sad.resize(num_elements);
-
+    
+    motion_vectors_raw.msg = motion_vectors.msg;
+  
     for (size_t i = 0; i < num_elements; i++) {
-      motion_vectors.msg.x[i] = imv->x;
-      motion_vectors.msg.y[i] = imv->y;
-      motion_vectors.msg.sad[i] = imv->sad;
+      motion_vectors_raw.msg.x[i] = imv->x;
+      motion_vectors_raw.msg.y[i] = imv->y;
+      motion_vectors_raw.msg.sad[i] = imv->sad;
+
+      // Copy the content of motion_vectors.msg in motion_vectors_raw.msg
+      motion_vectors.msg = motion_vectors_raw.msg;
+      
+      Vector3d p(motion_vectors.msg.x[i], motion_vectors.msg.y[i], 1);
+
+      // TODO: check that this is the correct way to apply the homography
+      Vector3d projected_p = homography * p;
+
+      motion_vectors.msg.x[i] = projected_p(0) / projected_p(2);
+      motion_vectors.msg.y[i] = projected_p(1) / projected_p(2);
       imv++;
     }
 
     mmal_buffer_header_mem_unlock(buffer);
 
     motion_vectors.pub->publish(motion_vectors.msg);
+    motion_vectors_raw.pub->publish(motion_vectors_raw.msg);
     pData->frame++;
   }
 
@@ -1320,9 +1368,11 @@ int main(int argc, char** argv) {
 
   std::string camera_info_url;
   std::string camera_name;
+  std::string homography_path;
 
   nh_params.param("camera_info_url", camera_info_url, std::string("package://raspicam_node/camera_info/camera.yaml"));
   nh_params.param("camera_name", camera_name, std::string("camera"));
+  nh_params.param("homography_path", homography_path, std::string("/data/config/calibrations/camera_extrinsic/default.yaml"));
 
   camera_info_manager::CameraInfoManager c_info_man(nh_params, camera_name, camera_info_url);
 
@@ -1360,8 +1410,11 @@ int main(int argc, char** argv) {
   }
   if (state_srv.enable_imv_pub) {
     auto imv_pub = nh_topics.advertise<raspicam_node::MotionVectors>("motion_vectors", 1);
+    auto imv_pub_raw = nh_topics.advertise<raspicam_node::MotionVectors>("motion_vectors_raw", 1);
     motion_vectors.pub.reset(new DiagnosedPublisher<raspicam_node::MotionVectors>(
         imv_pub, state_srv.updater, FrequencyStatusParam(&min_freq, &max_freq, 0.1, 10), TimeStampStatusParam(0, 0.2)));
+    motion_vectors_raw.pub.reset(new DiagnosedPublisher<raspicam_node::MotionVectors>(
+        imv_pub_raw, state_srv.updater, FrequencyStatusParam(&min_freq, &max_freq, 0.1, 10), TimeStampStatusParam(0, 0.2)));
   }
   auto cimage_pub = nh_topics.advertise<sensor_msgs::CompressedImage>("image/compressed", 1);
   compressed_image.pub.reset(new DiagnosedPublisher<sensor_msgs::CompressedImage>(
