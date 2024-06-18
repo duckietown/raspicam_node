@@ -78,7 +78,6 @@ int main(int argc, char** argv) {
 #include <raspicam_node/CameraConfig.h>
 
 #include "mmal_cxx_helper.h"
-#include <Eigen/Dense>
 #include <yaml-cpp/yaml.h>
 
 
@@ -90,10 +89,11 @@ static constexpr int VIDEO_FRAME_RATE_DEN = 1;
 // Video render needs at least 2 buffers.
 static constexpr int VIDEO_OUTPUT_BUFFERS_NUM = 3;
 
-using Eigen::Matrix3d;
-using Eigen::Vector3d;
+#include <opencv2/core.hpp>
+#include <opencv2/calib3d.hpp>
+#include <opencv2/imgproc/imgproc.hpp>
 
-static Matrix3d homography;
+static cv::Mat_<double> homography = cv::Mat_<double>(3, 3);
 
 /** Structure containing all state information for the current run
  */
@@ -178,6 +178,30 @@ sensor_msgs::CameraInfo c_info;
 std::string camera_frame_id;
 int skip_frames = 0;
 
+// Add a function to convert normalized coordinates to pixel coordinates
+static cv::Point2d normalized2pixel(const cv::Mat& K, double normalized_x, double normalized_y) {
+  double cx = K.at<double>(0, 2);
+  double cy = K.at<double>(1, 2);
+  double fx = K.at<double>(0, 0);
+  double fy = K.at<double>(1, 1);
+
+  double x = normalized_x * fx + cx;
+  double y = normalized_y * fy + cy;
+  return cv::Point2d(x, y);
+}
+
+// Add a function to convert pixel coordinates to normalized coordinates
+static cv::Point2d pixel2normalized(const cv::Mat& K, double pixel_x, double pixel_y) {
+  double cx = K.at<double>(0, 2);
+  double cy = K.at<double>(1, 2);
+  double fx = K.at<double>(0, 0);
+  double fy = K.at<double>(1, 1);
+
+  double normalized_x = (pixel_x - cx) / fx;
+  double normalized_y = (pixel_y - cy) / fy;
+  return cv::Point2d(normalized_x, normalized_y);
+}
+
 static int load_homography_from_file(std::string homography_path) {
     YAML::Node config = YAML::LoadFile(homography_path);
     // The homography is a 3x3 matrix
@@ -190,7 +214,7 @@ static int load_homography_from_file(std::string homography_path) {
     data = config["homography"].as<std::vector<double>>();
     for (int i = 0; i < rows; ++i) {
         for (int j = 0; j < cols; ++j) {
-            homography(i, j) = data[i * cols + j];
+            homography.at<double>(i, j) = data[i * cols + j];
         }
     }
 
@@ -373,22 +397,63 @@ static void video_encoder_buffer_callback(MMAL_PORT_T* port, MMAL_BUFFER_HEADER_
     motion_vectors.msg.sad.resize(num_elements);
     
     motion_vectors_raw.msg = motion_vectors.msg;
-  
+    
+    // Initialize camera parameters if not done already
+    cv::Mat D = cv::Mat(c_info.D.size(), 1, CV_64F, c_info.D.data());
+    cv::Mat_<double> K = cv::Mat_<double>(3, 3, c_info.K.data());
+    cv::Mat P = cv::Mat_<double>(3, 4, c_info.P.data());
+    cv::Mat R = cv::Mat_<double>(3, 3, c_info.R.data());
+
+    // Assuming the motion vectors are relative to macroblocks, compute original positions
+    std::vector<cv::Point2d> original_positions;
+    for (int by = 0; by < motion_vectors.msg.mby; ++by) {
+        for (int bx = 0; bx < motion_vectors.msg.mbx; ++bx) {
+            // Calculate original position of each macroblock (e.g., top-left corner)
+            cv::Point2d block_top_left(bx * 16, by * 16); // Assuming 16x16 macroblocks
+            original_positions.push_back(block_top_left);
+        }
+    }
+
     for (size_t i = 0; i < num_elements; i++) {
       motion_vectors_raw.msg.x[i] = imv->x;
       motion_vectors_raw.msg.y[i] = imv->y;
       motion_vectors_raw.msg.sad[i] = imv->sad;
 
-      // Copy the content of motion_vectors.msg in motion_vectors_raw.msg
-      motion_vectors.msg = motion_vectors_raw.msg;
+      // Compute the absolute positions of the head and tail of the motion vector
+      cv::Point2d tail = original_positions[i];
+      cv::Point2d head = tail + cv::Point2d(imv->x, imv->y);
       
-      Vector3d p(motion_vectors.msg.x[i], motion_vectors.msg.y[i], 1);
+      cv::Point2d points[2] = {tail, head};
 
-      // TODO: check that this is the correct way to apply the homography
-      Vector3d projected_p = homography * p;
+      for (int j = 0; j < 2; j++) {
+        // Undistort both points
+        std::vector<cv::Point2d> distorted_point = {cv::Point2d(points[j].x, points[j].y)};
+        std::vector<cv::Point2d> rectified_point;
+        cv::undistortPoints(distorted_point, rectified_point, K, D, R, P);
 
-      motion_vectors.msg.x[i] = projected_p(0) / projected_p(2);
-      motion_vectors.msg.y[i] = projected_p(1) / projected_p(2);
+        // Convert to normalized coordinates using pixel2normalized function
+        cv::Point2d normalized_point = pixel2normalized(K, rectified_point[0].x, rectified_point[0].y);
+
+        // Apply homography
+        cv::Mat p_point(3, 1, CV_64F);
+        p_point.at<double>(0, 0) = normalized_point.x;
+        p_point.at<double>(1, 0) = normalized_point.y;
+        p_point.at<double>(2, 0) = 1;
+
+        cv::Mat projected_point = homography * p_point;
+
+        // Convert back to pixel coordinates
+        cv::Point2d px_coord = normalized2pixel(K, projected_point.at<double>(0, 0) / projected_point.at<double>(2, 0), projected_point.at<double>(1, 0) / projected_point.at<double>(2, 0));
+
+        if (j == 0) {
+          motion_vectors.msg.x[i] = px_coord.x;
+          motion_vectors.msg.y[i] = px_coord.y;
+        } else {
+          motion_vectors.msg.x[i] -= px_coord.x;
+          motion_vectors.msg.y[i] -= px_coord.y;
+        }
+      }
+
       imv++;
     }
 
