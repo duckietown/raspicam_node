@@ -78,6 +78,8 @@ int main(int argc, char** argv) {
 #include <raspicam_node/CameraConfig.h>
 
 #include "mmal_cxx_helper.h"
+#include <yaml-cpp/yaml.h>
+
 
 static constexpr int IMG_BUFFER_SIZE = 10 * 1024 * 1024;  // 10 MB
 
@@ -86,6 +88,12 @@ static constexpr int VIDEO_FRAME_RATE_DEN = 1;
 
 // Video render needs at least 2 buffers.
 static constexpr int VIDEO_OUTPUT_BUFFERS_NUM = 3;
+
+#include <opencv2/core.hpp>
+#include <opencv2/calib3d.hpp>
+#include <opencv2/imgproc/imgproc.hpp>
+
+static cv::Mat_<double> homography = cv::Mat_<double>(3, 3);
 
 /** Structure containing all state information for the current run
  */
@@ -161,11 +169,59 @@ struct DiagnosedMsgPublisher {
 static DiagnosedMsgPublisher<sensor_msgs::Image> image;
 static DiagnosedMsgPublisher<sensor_msgs::CompressedImage> compressed_image;
 static DiagnosedMsgPublisher<raspicam_node::MotionVectors> motion_vectors;
+static DiagnosedMsgPublisher<raspicam_node::MotionVectors> motion_vectors_raw;
 
+
+// Global or static variable to hold the transformation matrix
 ros::Publisher camera_info_pub;
 sensor_msgs::CameraInfo c_info;
 std::string camera_frame_id;
 int skip_frames = 0;
+
+// Add a function to convert normalized coordinates to pixel coordinates
+static cv::Point2d normalized2pixel(const cv::Mat& K, double normalized_x, double normalized_y) {
+  double cx = K.at<double>(0, 2);
+  double cy = K.at<double>(1, 2);
+  double fx = K.at<double>(0, 0);
+  double fy = K.at<double>(1, 1);
+
+  double x = normalized_x * fx + cx;
+  double y = normalized_y * fy + cy;
+  return cv::Point2d(x, y);
+}
+
+// Add a function to convert pixel coordinates to normalized coordinates
+static cv::Point2d pixel2normalized(const cv::Mat& K, double pixel_x, double pixel_y) {
+  double cx = K.at<double>(0, 2);
+  double cy = K.at<double>(1, 2);
+  double fx = K.at<double>(0, 0);
+  double fy = K.at<double>(1, 1);
+
+  double normalized_x = (pixel_x - cx) / fx;
+  double normalized_y = (pixel_y - cy) / fy;
+  return cv::Point2d(normalized_x, normalized_y);
+}
+
+static int load_homography_from_file(std::string homography_path) {
+    YAML::Node config = YAML::LoadFile(homography_path);
+    // The homography is a 3x3 matrix
+    int rows = 3; 
+    int cols = 3;
+    
+    std::vector<double> data(rows*cols);
+
+    // Data is in flattened format
+    data = config["homography"].as<std::vector<double>>();
+    for (int i = 0; i < rows; ++i) {
+        for (int j = 0; j < cols; ++j) {
+            homography.at<double>(i, j) = data[i * cols + j];
+        }
+    }
+
+    std::cout << "Loaded homography:" << std::endl;
+    std::cout << homography << std::endl;
+    return 0;
+}
 
 /**
  * Assign a default set of parameters to the state passed in
@@ -195,7 +251,9 @@ static void configure_parameters(RASPIVID_STATE& state, ros::NodeHandle& nh) {
 
   // Set up the camera_parameters to default
   raspicamcontrol_set_defaults(state.camera_parameters);
-
+  std::string homography_path;
+  nh.param<std::string>("homography_path", homography_path, "/data/config/calibrations/camera_extrinsic/default.yaml");
+  load_homography_from_file(homography_path);
   bool temp;
   nh.param<bool>("hFlip", temp, false);
   state.camera_parameters.hflip = temp;  // Hack for bool param => int variable
@@ -337,17 +395,72 @@ static void video_encoder_buffer_callback(MMAL_PORT_T* port, MMAL_BUFFER_HEADER_
     motion_vectors.msg.x.resize(num_elements);
     motion_vectors.msg.y.resize(num_elements);
     motion_vectors.msg.sad.resize(num_elements);
+    
+    motion_vectors_raw.msg = motion_vectors.msg;
+    
+    // Initialize camera parameters if not done already
+    cv::Mat D = cv::Mat(c_info.D.size(), 1, CV_64F, c_info.D.data());
+    cv::Mat_<double> K = cv::Mat_<double>(3, 3, c_info.K.data());
+    cv::Mat P = cv::Mat_<double>(3, 4, c_info.P.data());
+    cv::Mat R = cv::Mat_<double>(3, 3, c_info.R.data());
+
+    // Assuming the motion vectors are relative to macroblocks, compute original positions
+    std::vector<cv::Point2d> original_positions;
+    for (int by = 0; by < motion_vectors.msg.mby; ++by) {
+        for (int bx = 0; bx < motion_vectors.msg.mbx; ++bx) {
+            // Calculate original position of each macroblock (e.g., top-left corner)
+            cv::Point2d block_top_left(bx * 16, by * 16); // Assuming 16x16 macroblocks
+            original_positions.push_back(block_top_left);
+        }
+    }
 
     for (size_t i = 0; i < num_elements; i++) {
-      motion_vectors.msg.x[i] = imv->x;
-      motion_vectors.msg.y[i] = imv->y;
-      motion_vectors.msg.sad[i] = imv->sad;
+      motion_vectors_raw.msg.x[i] = imv->x;
+      motion_vectors_raw.msg.y[i] = imv->y;
+      motion_vectors_raw.msg.sad[i] = imv->sad;
+
+      // Compute the absolute positions of the head and tail of the motion vector
+      cv::Point2d tail = original_positions[i];
+      cv::Point2d head = tail + cv::Point2d(imv->x, imv->y);
+      
+      cv::Point2d points[2] = {tail, head};
+
+      for (int j = 0; j < 2; j++) {
+        // Undistort both points
+        std::vector<cv::Point2d> distorted_point = {cv::Point2d(points[j].x, points[j].y)};
+        std::vector<cv::Point2d> rectified_point;
+        cv::undistortPoints(distorted_point, rectified_point, K, D, R, P);
+
+        // Convert to normalized coordinates using pixel2normalized function
+        cv::Point2d normalized_point = pixel2normalized(K, rectified_point[0].x, rectified_point[0].y);
+
+        // Apply homography
+        cv::Mat p_point(3, 1, CV_64F);
+        p_point.at<double>(0, 0) = normalized_point.x;
+        p_point.at<double>(1, 0) = normalized_point.y;
+        p_point.at<double>(2, 0) = 1;
+
+        cv::Mat projected_point = homography * p_point;
+
+        // Convert back to pixel coordinates
+        cv::Point2d px_coord = normalized2pixel(K, projected_point.at<double>(0, 0) / projected_point.at<double>(2, 0), projected_point.at<double>(1, 0) / projected_point.at<double>(2, 0));
+
+        if (j == 0) {
+          motion_vectors.msg.x[i] = px_coord.x;
+          motion_vectors.msg.y[i] = px_coord.y;
+        } else {
+          motion_vectors.msg.x[i] -= px_coord.x;
+          motion_vectors.msg.y[i] -= px_coord.y;
+        }
+      }
+
       imv++;
     }
 
     mmal_buffer_header_mem_unlock(buffer);
 
     motion_vectors.pub->publish(motion_vectors.msg);
+    motion_vectors_raw.pub->publish(motion_vectors_raw.msg);
     pData->frame++;
   }
 
@@ -1320,9 +1433,11 @@ int main(int argc, char** argv) {
 
   std::string camera_info_url;
   std::string camera_name;
+  std::string homography_path;
 
   nh_params.param("camera_info_url", camera_info_url, std::string("package://raspicam_node/camera_info/camera.yaml"));
   nh_params.param("camera_name", camera_name, std::string("camera"));
+  nh_params.param("homography_path", homography_path, std::string("/data/config/calibrations/camera_extrinsic/default.yaml"));
 
   camera_info_manager::CameraInfoManager c_info_man(nh_params, camera_name, camera_info_url);
 
@@ -1360,8 +1475,11 @@ int main(int argc, char** argv) {
   }
   if (state_srv.enable_imv_pub) {
     auto imv_pub = nh_topics.advertise<raspicam_node::MotionVectors>("motion_vectors", 1);
+    auto imv_pub_raw = nh_topics.advertise<raspicam_node::MotionVectors>("motion_vectors_raw", 1);
     motion_vectors.pub.reset(new DiagnosedPublisher<raspicam_node::MotionVectors>(
         imv_pub, state_srv.updater, FrequencyStatusParam(&min_freq, &max_freq, 0.1, 10), TimeStampStatusParam(0, 0.2)));
+    motion_vectors_raw.pub.reset(new DiagnosedPublisher<raspicam_node::MotionVectors>(
+        imv_pub_raw, state_srv.updater, FrequencyStatusParam(&min_freq, &max_freq, 0.1, 10), TimeStampStatusParam(0, 0.2)));
   }
   auto cimage_pub = nh_topics.advertise<sensor_msgs::CompressedImage>("image/compressed", 1);
   compressed_image.pub.reset(new DiagnosedPublisher<sensor_msgs::CompressedImage>(

@@ -36,11 +36,11 @@ rosdep install --from-paths src --ignore-src --rosdistro=kinetic -y
 Compile the code with `catkin_make`.
 
 ## Running the Node
-Once you have the node built, you can run it using a launch file.
 
-For a V2.x camera, run `roslaunch raspicam_node camerav2_1280x960.launch`
+### NOTE: REQUIRED FILES
+This node requires an intrinsic camera calibration file to be placed at `~/.ros/camera_info/camera.yaml`
 
-For a V1.x camera, run `roslaunch raspicam_node camerav1_1280x720.launch`
+and a camera extrinsic calibration file in `/data/config/calibrations/camera_extrinsic/default.yaml`.
 
 Use `rqt_image_view` on a connected computer to view the published image.
 

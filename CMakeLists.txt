@@ -16,7 +16,11 @@ find_package(catkin REQUIRED COMPONENTS
   dynamic_reconfigure
   diagnostic_updater
   message_generation
+  cmake_modules
 )
+
+find_package(OpenCV REQUIRED)
+find_package(yaml-cpp REQUIRED)
 
 ## System dependencies are found with CMake's conventions
 # find_package(Boost REQUIRED COMPONENTS system)
@@ -104,6 +108,8 @@ catkin_package(
 #  LIBRARIES raspicam
 #  CATKIN_DEPENDS compressed_image_transport roscpp std_msgs
 #  DEPENDS system_lib
+   DEPENDS OpenCV
+
    CATKIN_DEPENDS message_runtime std_msgs
 )
 
@@ -115,6 +121,8 @@ catkin_package(
 ## Your package locations should be listed before other locations
 include_directories(include
   ${catkin_INCLUDE_DIRS}
+  ${OpenCV_INCLUDE_DIRS}
+  ${YAML_CPP_INCLUDE_DIR}
   /opt/vc/include
   /opt/vc/include/interface/vcos/pthreads
   /opt/vc/include/interface/vmcs_host/linux
@@ -132,7 +140,9 @@ add_dependencies(raspicam_node raspicam_node_gencfg)
 ## Specify libraries to link a library or executable target against
 target_link_libraries(raspicam_node
   ${catkin_LIBRARIES}
-  ${RPI_LIBRARIES} 
+  ${RPI_LIBRARIES}
+  ${YAML_CPP_LIBRARIES}
+  ${OpenCV_LIBRARIES}
 )
 
 #############
