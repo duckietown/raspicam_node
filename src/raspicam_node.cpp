@@ -46,6 +46,7 @@ int main(int argc, char** argv) {
 #include <string.h>
 
 #include <memory>
+#include <stdexcept>
 
 #define VCOS_ALWAYS_WANT_LOGGING
 #define VERSION_STRING "v1.2"
@@ -63,6 +64,7 @@ int main(int argc, char** argv) {
 
 #include "camera_info_manager/camera_info_manager.h"
 #include "ros/ros.h"
+#include <ros/package.h>
 #include "sensor_msgs/CameraInfo.h"
 #include "sensor_msgs/CompressedImage.h"
 #include "sensor_msgs/Image.h"
@@ -178,6 +180,34 @@ sensor_msgs::CameraInfo c_info;
 std::string camera_frame_id;
 int skip_frames = 0;
 
+
+std::string resolveURL(const std::string& url) {
+    ROS_INFO("Trying to resolve url", url);
+    if (url.substr(0, 10) == "package://") {
+        // Extract the package name and the relative path within the package
+        std::string package_path = url.substr(10);
+        size_t pos = package_path.find('/');
+        if (pos == std::string::npos) {
+            throw std::runtime_error("Invalid package URL format.");
+        }
+        std::string package_name = package_path.substr(0, pos);
+        std::string relative_path = package_path.substr(pos + 1);
+
+        // Get the absolute path of the package
+        std::string package_absolute_path = ros::package::getPath(package_name);
+        if (package_absolute_path.empty()) {
+            throw std::runtime_error("Package not found: " + package_name);
+        }
+
+        // Construct the absolute path
+        return package_absolute_path + "/" + relative_path;
+    } else if (url.substr(0, 7) == "file://") {
+        return url.substr(7);
+    } else {
+        throw std::runtime_error("Unsupported URL scheme.");
+    }
+}
+
 // Add a function to convert normalized coordinates to pixel coordinates
 static cv::Point2d normalized2pixel(const cv::Mat& K, double normalized_x, double normalized_y) {
   double cx = K.at<double>(0, 2);
@@ -251,9 +281,19 @@ static void configure_parameters(RASPIVID_STATE& state, ros::NodeHandle& nh) {
 
   // Set up the camera_parameters to default
   raspicamcontrol_set_defaults(state.camera_parameters);
+  // Resolve homography path from nh_params.homography_path
+  
   std::string homography_path;
-  nh.param<std::string>("homography_path", homography_path, "/data/config/calibrations/camera_extrinsic/default.yaml");
-  load_homography_from_file(homography_path);
+  nh.param<std::string>("homography_path", homography_path, std::string("package://raspicam_node/config/extrinsics/default.yaml"));
+  std::string homography_full_path;
+  try {
+      homography_full_path = resolveURL(homography_path);
+      ROS_INFO("Resolved path: %s", homography_full_path.c_str());
+  } catch (const std::exception& e) {
+      ROS_ERROR("Error resolving URL: %s", e.what());
+  }
+
+  load_homography_from_file(homography_full_path);
   bool temp;
   nh.param<bool>("hFlip", temp, false);
   state.camera_parameters.hflip = temp;  // Hack for bool param => int variable
@@ -1437,7 +1477,6 @@ int main(int argc, char** argv) {
 
   nh_params.param("camera_info_url", camera_info_url, std::string("package://raspicam_node/camera_info/camera.yaml"));
   nh_params.param("camera_name", camera_name, std::string("camera"));
-  nh_params.param("homography_path", homography_path, std::string("/data/config/calibrations/camera_extrinsic/default.yaml"));
 
   camera_info_manager::CameraInfoManager c_info_man(nh_params, camera_name, camera_info_url);
 
