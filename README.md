@@ -38,9 +38,9 @@ Compile the code with `catkin_make`.
 ## Running the Node
 
 ### NOTE: REQUIRED FILES
-This node requires an intrinsic camera calibration file to be placed at `~/.ros/camera_info/camera.yaml`
+This node requires an intrinsic camera calibration file to be placed at `camera_info/camera.yaml`
 
-and a camera extrinsic calibration file in `/data/config/calibrations/camera_extrinsic/default.yaml`.
+and a camera extrinsic calibration file in `config/extrinsics/default.yaml`.
 
 Use `rqt_image_view` on a connected computer to view the published image.
 
