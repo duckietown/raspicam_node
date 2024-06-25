@@ -1,6 +1,6 @@
-image_width: 410
-image_height: 308
-camera_name: camerav2_410x308
+image_width: 240
+image_height: 320
+camera_name: camera_dd24
 camera_matrix:
   rows: 3
   cols: 3
